@@ -140,9 +140,14 @@ simulator.reset_history()
 simulator.x0 = x0
 mpc.reset_history()
 
-for i in range(50):
+for i in range(15):
     u0 = mpc.make_step(x0)
     x0 = simulator.make_step(u0)
+    print(i)
+
+path_error = (x0[1][0] - x0[4][0]) ** 2 + (x0[2][0] - x0[5][0]) ** 2 + (x0[2][0] - x0[6][0]) ** 2
+print(x0)
+print(path_error)
 
 fig, ax = plt.subplots(1, sharex=True, figsize=(16,9))
 ax.plot(sim_graphics.data['_x', 'x_path'],sim_graphics.data['_x', 'y_path'])

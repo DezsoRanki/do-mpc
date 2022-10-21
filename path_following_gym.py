@@ -16,6 +16,9 @@ from gym.error import DependencyNotInstalled
 import do_mpc
 from casadi import *
 
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+
 
 class PathFollowingEnv(gym.Env[np.ndarray, Union[int, np.ndarray]]):
     """
@@ -162,6 +165,13 @@ class PathFollowingEnv(gym.Env[np.ndarray, Union[int, np.ndarray]]):
 
         self.steps_beyond_terminated = None
 
+    def step(self, action):
+        err_msg = f"{action!r} ({type(action)}) invalid"
+        assert self.action_space.contains(action), err_msg
+        assert self.state is not None, "Call reset before using step method."
+        x0 = self.state
+        _path_error = self.path_error
+
         # dynamics
         self.model.set_rhs('theta', self.theta)
         self.model.set_rhs('x_path', self.theta)
@@ -204,8 +214,8 @@ class PathFollowingEnv(gym.Env[np.ndarray, Union[int, np.ndarray]]):
         self.r_a = 700
         self.r_w = 0.2
         self.r_theta = 1000
-        self.p_a = 10e5
-        self.q_a = 10e5
+        self.p_a = action
+        self.q_a = action        
 
         self.mterm = self.p_x * ((self.x + self.lf * np.cos(self.phi) - self.x_path) ** 2) + self.p_y * ((self.y + self.lf * np.sin(self.phi) - self.y_path) ** 2) + self.p_phi * ((self.phi - self.phi_path) ** 2) + \
                 self.p_a * ((self.v * ((self.v / self.lr) * np.sin(np.arctan((self.lr / (self.lf + self.lr)) * np.tan((self.delta_s - self.k0) / (self.k1 + self.k2 * self.v)))))) ** 2)
@@ -239,72 +249,72 @@ class PathFollowingEnv(gym.Env[np.ndarray, Union[int, np.ndarray]]):
 
         self.simulator.setup()
 
-        self.x0 = np.array([1, 1, 1, np.arctan(2), 1, 1, np.arctan(2), 1, 1, 1, 1]).reshape(-1,1)
+        x0 = np.array([1, 1, 1, np.arctan(2), 1, 1, np.arctan(2), 1, 1, 1, 1]).reshape(-1,1)
 
-        self.simulator.x0 = self.x0
-        self.mpc.x0 = self.x0
+        self.simulator.x0 = x0
+        self.mpc.x0 = x0
 
         self.mpc.set_initial_guess()
 
-    def step(self, action):
-        err_msg = f"{action!r} ({type(action)}) invalid"
-        assert self.action_space.contains(action), err_msg
-        assert self.state is not None, "Call reset before using step method."
-        x, x_dot, theta, theta_dot = self.state
-        force = self.force_mag if action == 1 else -self.force_mag
-        costheta = math.cos(theta)
-        sintheta = math.sin(theta)
+        mpl.rcParams['font.size'] = 18
+        mpl.rcParams['lines.linewidth'] = 3
+        mpl.rcParams['axes.grid'] = True
 
-        # For the interested reader:
-        # https://coneural.org/florian/papers/05_cart_pole.pdf
-        temp = (
-            force + self.polemass_length * theta_dot**2 * sintheta
-        ) / self.total_mass
-        thetaacc = (self.gravity * sintheta - costheta * temp) / (
-            self.length * (4.0 / 3.0 - self.masspole * costheta**2 / self.total_mass)
-        )
-        xacc = temp - self.polemass_length * thetaacc * costheta / self.total_mass
+        mpc_graphics = do_mpc.graphics.Graphics(self.mpc.data)
+        sim_graphics = do_mpc.graphics.Graphics(self.simulator.data)
 
-        if self.kinematics_integrator == "euler":
-            x = x + self.tau * x_dot
-            x_dot = x_dot + self.tau * xacc
-            theta = theta + self.tau * theta_dot
-            theta_dot = theta_dot + self.tau * thetaacc
-        else:  # semi-implicit euler
-            x_dot = x_dot + self.tau * xacc
-            x = x + self.tau * x_dot
-            theta_dot = theta_dot + self.tau * thetaacc
-            theta = theta + self.tau * theta_dot
+        self.simulator.reset_history()
+        self.simulator.x0 = x0
+        self.mpc.reset_history()
 
-        self.state = (x, x_dot, theta, theta_dot)
+        for i in range(50):
+            u0 = self.mpc.make_step(x0)
+            x0 = self.simulator.make_step(u0)
+
+        self.state = x0
+
+        self.path_error = (x0[1][0] - x0[4][0]) ** 2 + (x0[2][0] - x0[5][0]) ** 2 + (x0[2][0] - x0[6][0]) ** 2
+
+        fig, ax = plt.subplots(1, sharex=True, figsize=(16,9))
+        ax.plot(sim_graphics.data['_x', 'x_path'],sim_graphics.data['_x', 'y_path'])
+        ax.plot(sim_graphics.data['_x', 'x'],sim_graphics.data['_x', 'y'])
+        plt.show()
 
         terminated = bool(
-            x < -self.x_threshold
-            or x > self.x_threshold
-            or theta < -self.theta_threshold_radians
-            or theta > self.theta_threshold_radians
+            x0[1][0] < -self.x_threshold
+            or x0[1][0] > self.x_threshold
+            or x0[2][0] < -self.y_threshold
+            or x0[2][0] > self.y_threshold
+            or x0[3][0] < -self.phi_threshold
+            or x0[3][0] > self.phi_threshold
         )
 
-        if not terminated:
-            reward = 1.0
-        elif self.steps_beyond_terminated is None:
-            # Pole just fell!
-            self.steps_beyond_terminated = 0
+
+        # reward
+        if self.path_error < _path_error:
             reward = 1.0
         else:
-            if self.steps_beyond_terminated == 0:
-                logger.warn(
-                    "You are calling 'step()' even though this "
-                    "environment has already returned terminated = True. You "
-                    "should always call 'reset()' once you receive 'terminated = "
-                    "True' -- any further steps are undefined behavior."
-                )
-            self.steps_beyond_terminated += 1
             reward = 0.0
+        # if not terminated:
+        #     reward = 1.0
+        # elif self.steps_beyond_terminated is None:
+        #     # Pole just fell!
+        #     self.steps_beyond_terminated = 0
+        #     reward = 1.0
+        # else:
+        #     if self.steps_beyond_terminated == 0:
+        #         logger.warn(
+        #             "You are calling 'step()' even though this "
+        #             "environment has already returned terminated = True. You "
+        #             "should always call 'reset()' once you receive 'terminated = "
+        #             "True' -- any further steps are undefined behavior."
+        #         )
+        #     self.steps_beyond_terminated += 1
+        #     reward = 0.0
 
         if self.render_mode == "human":
             self.render()
-        return np.array(self.state, dtype=np.float32), reward, terminated, False, {}
+        return self.state, self.path_error, reward, terminated, False, {}
 
     def reset(
         self,
@@ -313,111 +323,11 @@ class PathFollowingEnv(gym.Env[np.ndarray, Union[int, np.ndarray]]):
         options: Optional[dict] = None,
     ):
         super().reset(seed=seed)
-        # Note that if you use custom reset bounds, it may lead to out-of-bound
-        # state/observations.
-        low, high = utils.maybe_parse_reset_bounds(
-            options, -0.05, 0.05  # default low
-        )  # default high
-        self.state = self.np_random.uniform(low=low, high=high, size=(4,))
+        self.state = np.array([1, 1, 1, np.arctan(2), 1, 1, np.arctan(2), 1, 1, 1, 1]).reshape(-1,1)
+        self.path_error = inf
         self.steps_beyond_terminated = None
 
         if self.render_mode == "human":
             self.render()
         return np.array(self.state, dtype=np.float32), {}
 
-    def render(self):
-        try:
-            import pygame
-            from pygame import gfxdraw
-        except ImportError:
-            raise DependencyNotInstalled(
-                "pygame is not installed, run `pip install gym[classic_control]`"
-            )
-
-        if self.screen is None:
-            pygame.init()
-            if self.render_mode == "human":
-                pygame.display.init()
-                self.screen = pygame.display.set_mode(
-                    (self.screen_width, self.screen_height)
-                )
-            else:  # mode == "rgb_array"
-                self.screen = pygame.Surface((self.screen_width, self.screen_height))
-        if self.clock is None:
-            self.clock = pygame.time.Clock()
-
-        world_width = self.x_threshold * 2
-        scale = self.screen_width / world_width
-        polewidth = 10.0
-        polelen = scale * (2 * self.length)
-        cartwidth = 50.0
-        cartheight = 30.0
-
-        if self.state is None:
-            return None
-
-        x = self.state
-
-        self.surf = pygame.Surface((self.screen_width, self.screen_height))
-        self.surf.fill((255, 255, 255))
-
-        l, r, t, b = -cartwidth / 2, cartwidth / 2, cartheight / 2, -cartheight / 2
-        axleoffset = cartheight / 4.0
-        cartx = x[0] * scale + self.screen_width / 2.0  # MIDDLE OF CART
-        carty = 100  # TOP OF CART
-        cart_coords = [(l, b), (l, t), (r, t), (r, b)]
-        cart_coords = [(c[0] + cartx, c[1] + carty) for c in cart_coords]
-        gfxdraw.aapolygon(self.surf, cart_coords, (0, 0, 0))
-        gfxdraw.filled_polygon(self.surf, cart_coords, (0, 0, 0))
-
-        l, r, t, b = (
-            -polewidth / 2,
-            polewidth / 2,
-            polelen - polewidth / 2,
-            -polewidth / 2,
-        )
-
-        pole_coords = []
-        for coord in [(l, b), (l, t), (r, t), (r, b)]:
-            coord = pygame.math.Vector2(coord).rotate_rad(-x[2])
-            coord = (coord[0] + cartx, coord[1] + carty + axleoffset)
-            pole_coords.append(coord)
-        gfxdraw.aapolygon(self.surf, pole_coords, (202, 152, 101))
-        gfxdraw.filled_polygon(self.surf, pole_coords, (202, 152, 101))
-
-        gfxdraw.aacircle(
-            self.surf,
-            int(cartx),
-            int(carty + axleoffset),
-            int(polewidth / 2),
-            (129, 132, 203),
-        )
-        gfxdraw.filled_circle(
-            self.surf,
-            int(cartx),
-            int(carty + axleoffset),
-            int(polewidth / 2),
-            (129, 132, 203),
-        )
-
-        gfxdraw.hline(self.surf, 0, self.screen_width, carty, (0, 0, 0))
-
-        self.surf = pygame.transform.flip(self.surf, False, True)
-        self.screen.blit(self.surf, (0, 0))
-        if self.render_mode == "human":
-            pygame.event.pump()
-            self.clock.tick(self.metadata["render_fps"])
-            pygame.display.flip()
-
-        elif self.render_mode == "rgb_array":
-            return np.transpose(
-                np.array(pygame.surfarray.pixels3d(self.screen)), axes=(1, 0, 2)
-            )
-
-    def close(self):
-        if self.screen is not None:
-            import pygame
-
-            pygame.display.quit()
-            pygame.quit()
-            self.isopen = False
